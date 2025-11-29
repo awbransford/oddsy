@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Streamlit local state
+.streamlit/
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# macOS junk files
+.DS_Store
