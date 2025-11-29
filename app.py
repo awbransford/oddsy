@@ -84,6 +84,17 @@ else:
         statuses = sorted(df["status"].dropna().unique().tolist())
         selected_statuses = st.multiselect("Status", statuses, default=statuses)
         df = df[df["status"].isin(selected_statuses)]
+        
+    if "volume" in df.columns:
+        max_vol = df["volume"].fillna(0).max()
+        if pd.isna(max_vol):
+            max_vol = 0
+        max_vol = int(max_vol)
+        
+        # only show slider if there's a variation in volume. min cannot == max
+        if max_vol > 0:
+            min_volume = st.slider("Minimum total volume", 0, max_vol, 0)
+            df = df[df["volume"].fillna(0) >= min_volume]
 
     search = st.text_input("Search markets")
 
@@ -95,7 +106,9 @@ else:
         df_filtered = df[mask]
     else:
         df_filtered = df
-
+    
+    df_filtered["platform"] = "kalshi"
+    
     # convert dollar odds to % where present
     for col in [
         "yes_bid_dollars",
@@ -123,15 +136,27 @@ else:
     #     if col in df_filtered.columns:
     #         df_filtered[col] = (df_filtered[col].astype(float) * 100).round(1)
 
-    # NOTE: you are converting close_time again here; keeping it because you had it,
-    # but this will overwrite the formatted string above.
-    if "close_time" in df_filtered.columns:
-        df_filtered["close_time"] = pd.to_datetime(df_filtered["close_time"])
-
+    # Sort options
+    sort_options = []
     if "volume_24h" in df_filtered.columns:
+        sort_options.append("24h volume")
+    if "volume" in df_filtered.columns:
+        sort_options.append("total volume")
+    if "last_traded_pct" in df_filtered.columns:
+        sort_options.append("last traded %")
+    if "close_time" in df_filtered.columns:
+        sort_options.append("close time")
+
+    sort_by = st.selectbox("Sort by", sort_options or ["none"])
+
+    if sort_by == "24h volume":
         df_filtered = df_filtered.sort_values("volume_24h", ascending=False)
-    elif "volume" in df_filtered.columns:
+    elif sort_by == "total volume":
         df_filtered = df_filtered.sort_values("volume", ascending=False)
+    elif sort_by == "last traded %":
+        df_filtered = df_filtered.sort_values("last_traded_pct", ascending=False)
+    elif sort_by == "close time":
+        df_filtered = df_filtered.sort_values("close_time", ascending=True)
 
     st.write(f"Showing {len(df_filtered)} markets")
 
