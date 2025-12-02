@@ -1,31 +1,197 @@
 import streamlit as st
 import pandas as pd
 import requests
+import os
+import datetime
+import base64
 
-API_URL = "https://api.elections.kalshi.com/trade-api/v2/markets"
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
+from dotenv import load_dotenv
+from services.stats_service import get_top_level_stats
+from ui.components.stats_bar import render_stats_bar
+
+load_dotenv()
+
+API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
+PRIVATE_KEY_PATH = os.getenv("KALSHI_API_PRIVATE_KEY")
+BASE_URL = "https://demo-api.kalshi.co"
+
+def load_private_key(key_path: str):
+    """Load the Kalshi private key from file."""
+    if not key_path:
+        raise RuntimeError("KALSHI_PRIVATE_KEY_PATH is not set in .env")
+
+    with open(key_path, "rb") as f:
+        return serialization.load_pem_private_key(
+            f.read(),
+            password=None,
+            backend=default_backend(),
+        )
 
 
-def fetch_kalshi_markets():
-    response = requests.get(API_URL)
+def create_signature(private_key, timestamp: str, method: str, path: str) -> str:
+    """Create the request signature according to Kalshi docs."""
+    # Strip query parameters before signing
+    path_without_query = path.split("?")[0]
+
+    message = f"{timestamp}{method}{path_without_query}".encode("utf-8")
+
+    signature = private_key.sign(
+        message,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+
+    return base64.b64encode(signature).decode("utf-8")
+
+
+PRIVATE_KEY = load_private_key(PRIVATE_KEY_PATH)
+
+
+def kalshi_get(path: str):
+    """
+    Make an authenticated GET request to Kalshi.
+    `path` must start with /trade-api/v2/...
+    """
+    if not API_KEY_ID:
+        raise RuntimeError("KALSHI_API_KEY_ID is not set in .env")
+
+    timestamp = str(int(datetime.datetime.now().timestamp() * 1000))  # ms
+    signature = create_signature(PRIVATE_KEY, timestamp, "GET", path)
+
+    headers = {
+        "KALSHI-ACCESS-KEY": API_KEY_ID,
+        "KALSHI-ACCESS-SIGNATURE": signature,
+        "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    }
+
+    response = requests.get(BASE_URL + path, headers=headers)
     response.raise_for_status()
-    data = response.json()
-    markets = data.get("markets", data)
-    return pd.json_normalize(markets)
+    return response.json()
 
+
+def fetch_kalshi_markets(status: str = "open", max_pages: int = 5, page_limit: int = 500):
+    # Fetch markets from Kalshi with pagination and safety guards.
+
+    # - status: "open", "closed", etc. (depends on what you want)
+    # - max_pages: safety cap so we do not loop forever
+    # - page_limit: per-page limit
+
+    # Returns a normalized DataFrame of all markets fetched.
+    
+    all_markets = []
+    cursor = None
+    pages_fetched = 0
+    
+    while True:
+        pages_fetched += 1
+        if pages_fetched > max_pages:
+            break
+        query = f"?limit={page_limit}"
+        if status:
+            query += f"&status={status}"
+        if cursor:
+            query += f"&cursor={cursor}"
+    
+        path = f"/trade-api/v2/markets{query}"
+        
+        try:
+            data = kalshi_get(path)
+        except Exception as e:
+            print(f"Error fetching markets page {pages_fetched}: {e}")
+            break
+        
+        markets = data.get("markets", data)
+        if not markets:
+            break
+        
+        all_markets.extend(markets)
+        
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+        
+        if not all_markets:
+            return pd.DataFrame()
+        
+        return pd.json_normalize(markets)
+
+def fetch_kalshi_trades_last_week(max_pages: int = 5):
+    
+    # Fetch all trades from the last 7 days w/ safety guards:
+    # - Limit the number of pages (max_pages)
+    # - Handles errors so Streamlit doesn't run infinitely
+    
+    # Kalshi expects Unix timestamps (seconds, UTC)
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    now = int(now_dt.timestamp())
+    week_ago = now - 7 * 24 * 60 * 60
+
+    all_trades = []
+    cursor = None
+    limit = 500
+    
+    pages_fetched = 0
+
+    while True:
+        pages_fetched += 1
+        if pages_fetched > max_pages:
+                break
+            
+        query = f"?limit={limit}&min_ts={week_ago}&max_ts={now}"
+        if cursor:
+            query += f"&cursor={cursor}"
+
+        path = f"/trade-api/v2/markets/trades{query}"
+        
+        try:
+            data = kalshi_get(path)
+        except Exception as e:
+            print(f"Error fetching trades page {pages_fetched}: {e}")
+            break
+        
+        trades = data.get("trades", [])
+        all_trades.extend(trades)
+
+        cursor = data.get("cursor")
+        if not cursor:  # when cursor is empty / null, no more pages
+            break
+
+    if not all_trades:
+        return pd.DataFrame()
+
+    return pd.json_normalize(all_trades)
 
 st.set_page_config(page_title="Prediction Markets MVP", layout="wide")
 st.title("Prediction Market Terminal (Kalshi - Public Endpoint MVP)")
 st.write("Data from Kalshi elections API.")
 
 if st.button("Refresh Data"):
-    st.session_state["df"] = fetch_kalshi_markets()
-    st.success("Fetched latest markets!")
+    # You can choose status="open" or "" to get all
+    markets_df = fetch_kalshi_markets(status="open", max_pages=5, page_limit=500)
+    trades_df = fetch_kalshi_trades_last_week(max_pages=5)
+    
+    st.session_state["markets_df"] = markets_df
+    st.session_state["trades_df"] = trades_df
+    
+    st.success("Fetched latest markets and trades!")
 
-df = st.session_state.get("df")
+markets_df = st.session_state.get("markets_df")
+trades_df = st.session_state.get("trades_df")
 
-if df is None:
+if markets_df is None:
     st.info("Click 'Refresh data' to load markets.")
 else:
+    df = markets_df.copy()
+    top_level_stats = get_top_level_stats(markets_df, trades_df)
+    render_stats_bar(top_level_stats)
+    st.markdown("---")
+    df = markets_df.copy()
     cols = [
         "title",
         "subtitle",
@@ -84,13 +250,13 @@ else:
         statuses = sorted(df["status"].dropna().unique().tolist())
         selected_statuses = st.multiselect("Status", statuses, default=statuses)
         df = df[df["status"].isin(selected_statuses)]
-        
+
     if "volume" in df.columns:
         max_vol = df["volume"].fillna(0).max()
         if pd.isna(max_vol):
             max_vol = 0
         max_vol = int(max_vol)
-        
+
         # only show slider if there's a variation in volume. min cannot == max
         if max_vol > 0:
             min_volume = st.slider("Minimum total volume", 0, max_vol, 0)
@@ -106,9 +272,9 @@ else:
         df_filtered = df[mask]
     else:
         df_filtered = df
-    
+
     df_filtered["platform"] = "kalshi"
-    
+
     # convert dollar odds to % where present
     for col in [
         "yes_bid_dollars",

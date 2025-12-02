@@ -1,5 +1,8 @@
 # Environment variables
 .env
+*.key
+*.txt
+kalshi_private.key
 
 # Python cache files
 __pycache__/
