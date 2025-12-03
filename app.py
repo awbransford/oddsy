@@ -116,10 +116,18 @@ def fetch_kalshi_markets(status: str = "open", max_pages: int = 5, page_limit: i
         if not cursor:
             break
         
-        if not all_markets:
-            return pd.DataFrame()
+    if not all_markets:
+        return pd.DataFrame()
         
-        return pd.json_normalize(markets)
+    return pd.json_normalize(markets)
+
+def inspect_kalshi_categories(df):
+    if "category" not in df.columns:
+        st.warning("No 'category' column found in markets_df")
+        return
+
+    cats = sorted(df["category"].fillna("unknown").unique().tolist())
+    st.write("Detected categories:", cats)
 
 def fetch_kalshi_trades_last_week(max_pages: int = 5):
     
@@ -187,10 +195,12 @@ trades_df = st.session_state.get("trades_df")
 if markets_df is None:
     st.info("Click 'Refresh data' to load markets.")
 else:
-    df = markets_df.copy()
+    # ---- Top-level stats bar ----
     top_level_stats = get_top_level_stats(markets_df, trades_df)
     render_stats_bar(top_level_stats)
     st.markdown("---")
+
+    # ---- Base dataframe for filters / display ----
     df = markets_df.copy()
     cols = [
         "title",
@@ -198,13 +208,7 @@ else:
         "ticker",
         "event_ticker",
         "category",
-        # "market_type",
-        # "created_time",
-        # "open_time",
         "close_time",
-        # "expected_expiration_time",
-        # "expiration_time",
-        # "latest_expiration_time",
         "status",
         "yes_bid_dollars",
         "yes_ask_dollars",
@@ -215,53 +219,129 @@ else:
         "volume_24h",
         "open_interest",
     ]
-    # "liquidity_dollars",
-    # "notional_value_dollars"]
     existing_cols = [c for c in cols if c in df.columns]
     df = df[existing_cols]
 
-    # filter out MULTIGAME from ticker
+    # ---- Platform tagging (Kalshi only for now) ----
+    df["platform"] = "kalshi"
+
+    # Filter out MULTIGAME noise
     if "ticker" in df.columns:
         df = df[~df["ticker"].str.contains("SPORTSMULTIGAME", case=False, na=False)]
 
-    # grab league from the ticker column
-    def extract_league(ticker):
-        if not isinstance(ticker, str):
-            return "OTHER"
-        t = ticker.upper()
-        if "NFL" in t:
-            return "NFL"
-        if "NBA" in t:
-            return "NBA"
-        return "OTHER"
+    # ---- Category normalization / filters (demo-safe) ----
+    # Only show category filter if there is at least one non-null category
+    st.write(
+        "DEBUG category check:",
+        "has_category_col =", "category" in df.columns,
+        "| any_non_null =", df["category"].notna().any(),
+    )
+    
+    if (
+        "category" in df.columns
+        and df["category"].notna().any()
+        and not BASE_URL.startswith("https://demo-api")
+    ):
 
-    if "ticker" in df.columns:
-        df["league"] = df["ticker"].apply(extract_league)
+        def normalize_category(raw):
+            if not isinstance(raw, str):
+                return "other"
+
+            value = raw.strip().lower()
+
+            # Direct matches to DeFiRate-style buckets
+            if value in {
+                "crypto",
+                "culture",
+                "economics",
+                "finance",
+                "mentions",
+                "politics",
+                "sports",
+                "tech",
+            }:
+                return value
+
+            # Fuzzy matching for prod
+            if "crypto" in value:
+                return "crypto"
+            if any(x in value for x in ["econ", "inflation", "gdp"]):
+                return "economics"
+            if any(x in value for x in ["finance", "rates", "interest"]):
+                return "finance"
+            if "politic" in value or "election" in value:
+                return "politics"
+            if "sport" in value or "nfl" in value or "nba" in value:
+                return "sports"
+            if "tech" in value or "ai" in value:
+                return "tech"
+            if "culture" in value or "entertainment" in value:
+                return "culture"
+            if "mentions" in value:
+                return "mentions"
+
+            return "other"
+
+        df["category_normalized"] = df["category"].apply(normalize_category)
+
+        CATEGORY_OPTIONS = [
+            "All categories",
+            "crypto",
+            "culture",
+            "economics",
+            "finance",
+            "mentions",
+            "politics",
+            "sports",
+            "tech",
+        ]
+
+        selected_category = st.selectbox("Category", CATEGORY_OPTIONS, index=0)
+
+        if selected_category != "All categories":
+            df = df[df["category_normalized"] == selected_category]
     else:
-        df["league"] = "UNKNOWN"
+        # Demo environment: all category values are null
+        st.info("Category data not available in this environment. Category filter disabled.")
 
-    leagues = sorted(df["league"].unique().tolist())
-    selected_leagues = st.multiselect("League", leagues, default=leagues)
+    # ---- Platform toggle (future-proof) ----
+    platform_values = sorted(df["platform"].unique().tolist())
 
-    # apply the league filter to df
-    df = df[df["league"].isin(selected_leagues)]
+    ui_options = []
+    if "kalshi" in platform_values:
+        ui_options.append("Kalshi")
+    if "polymarket" in platform_values:
+        ui_options.append("Polymarket")
 
+    if len(ui_options) > 1:
+        ui_options.insert(0, "Both")
+
+    selected_platform = st.radio("Platform", ui_options, horizontal=True)
+
+    if selected_platform == "Kalshi":
+        df = df[df["platform"] == "kalshi"]
+    elif selected_platform == "Polymarket":
+        df = df[df["platform"] == "polymarket"]
+    # If "Both": no filtering
+
+    # ---- Status filter ----
     if "status" in df.columns:
         statuses = sorted(df["status"].dropna().unique().tolist())
         selected_statuses = st.multiselect("Status", statuses, default=statuses)
         df = df[df["status"].isin(selected_statuses)]
 
+    # ---- Volume filter ----
     if "volume" in df.columns:
         max_vol = df["volume"].fillna(0).max()
         if pd.isna(max_vol):
             max_vol = 0
         max_vol = int(max_vol)
 
-        # only show slider if there's a variation in volume. min cannot == max
         if max_vol > 0:
             min_volume = st.slider("Minimum total volume", 0, max_vol, 0)
             df = df[df["volume"].fillna(0) >= min_volume]
 
+    # ---- Search ----
     search = st.text_input("Search markets")
 
     if search:
@@ -273,9 +353,9 @@ else:
     else:
         df_filtered = df
 
-    df_filtered["platform"] = "kalshi"
+    df_filtered = df_filtered.copy()
 
-    # convert dollar odds to % where present
+    # ---- Convert dollar odds to % ----
     for col in [
         "yes_bid_dollars",
         "yes_ask_dollars",
@@ -286,7 +366,7 @@ else:
         if col in df_filtered.columns:
             df_filtered[col] = (df_filtered[col].astype(float) * 100).round(1)
 
-    # rename for nicer labels
+    # Rename for nicer labels
     df_filtered = df_filtered.rename(
         columns={
             "yes_bid_dollars": "yes_bid_pct",
@@ -297,12 +377,7 @@ else:
         }
     )
 
-    # probabilities instead of raw dollar prices
-    # for col in ["yes_bid_dollars", "yes_ask_dollars", "last_price_dollars"]:
-    #     if col in df_filtered.columns:
-    #         df_filtered[col] = (df_filtered[col].astype(float) * 100).round(1)
-
-    # Sort options
+    # ---- Sort options ----
     sort_options = []
     if "volume_24h" in df_filtered.columns:
         sort_options.append("24h volume")
@@ -313,7 +388,18 @@ else:
     if "close_time" in df_filtered.columns:
         sort_options.append("close time")
 
-    sort_by = st.selectbox("Sort by", sort_options or ["none"])
+    if sort_options:
+        if "24h volume" in sort_options:
+            default_index = sort_options.index("24h volume")
+        elif "total volume" in sort_options:
+            default_index = sort_options.index("total volume")
+        else:
+            default_index = 0
+    else:
+        sort_options = ["none"]
+        default_index = 0
+
+    sort_by = st.selectbox("Sort by", sort_options, index=default_index)
 
     if sort_by == "24h volume":
         df_filtered = df_filtered.sort_values("volume_24h", ascending=False)
@@ -326,13 +412,12 @@ else:
 
     st.write(f"Showing {len(df_filtered)} markets")
 
-    # toggle to still see the raw table if you want
+    # ---- Table or cards ----
     show_table = st.checkbox("Show raw table view", value=False)
 
     if show_table:
         st.dataframe(df_filtered.reset_index(drop=True), use_container_width=True)
     else:
-        # card grid: 3 cards per row
         n_cols = 3
         df_display = df_filtered.reset_index(drop=True)
 
@@ -344,18 +429,17 @@ else:
                 with col:
                     with st.container(border=True):
                         # header
-                        league = m.get("league", "Unknown")
-                        st.caption(f"{league} · Kalshi")
+                        category_label = m.get("category_normalized", m.get("category", "Uncategorized"))
+                        platform_label = m.get("platform", "Kalshi")
+                        st.caption(f"{category_label.capitalize()} · {platform_label.capitalize()}")
 
                         st.markdown(f"**{m.get('title', 'Untitled market')}**")
 
-                        # core metrics
                         close_time = m.get("close_time", "N/A")
                         status = m.get("status", "N/A")
                         st.write(f"⌛ Closes: {close_time}")
                         st.write(f"📌 Status: `{status}`")
 
-                        # odds section
                         yes_bid = m.get("yes_bid_pct", None)
                         yes_ask = m.get("yes_ask_pct", None)
                         last_traded = m.get("last_traded_pct", None)
@@ -364,13 +448,11 @@ else:
                         st.write(f"- Bid: {yes_bid}%  | Ask: {yes_ask}%")
                         st.write(f"- Last traded: {last_traded}%")
 
-                        # activity
                         vol_24h = m.get("volume_24h", None)
                         vol_total = m.get("volume", None)
                         st.write("**Activity**")
                         st.write(f"- 24h volume: {vol_24h}")
                         st.write(f"- Total volume: {vol_total}")
 
-                        # optional: raw details expander
                         with st.expander("Raw details"):
                             st.json(dict(m))
