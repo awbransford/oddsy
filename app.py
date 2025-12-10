@@ -16,12 +16,13 @@ load_dotenv()
 
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
 PRIVATE_KEY_PATH = os.getenv("KALSHI_API_PRIVATE_KEY")
+PRIVATE_KEY_PEM = os.getenv("KALSHI_API_PRIVATE_KEY_PEM")
 BASE_URL = "https://demo-api.kalshi.co"
 
-def load_private_key(key_path: str):
-    """Load the Kalshi private key from file."""
+def load_private_key_from_path(key_path: str):
+    """Load the Kalshi private key from a file path (local dev)."""
     if not key_path:
-        raise RuntimeError("KALSHI_PRIVATE_KEY_PATH is not set in .env")
+        raise RuntimeError("KALSHI_API_PRIVATE_KEY (path) is not set in .env")
 
     with open(key_path, "rb") as f:
         return serialization.load_pem_private_key(
@@ -30,6 +31,21 @@ def load_private_key(key_path: str):
             backend=default_backend(),
         )
 
+def load_private_key_from_pem(pem_data: str):
+    """Load the Kalshi private key directly from PEM text (for cloud)."""
+    if not pem_data:
+        raise RuntimeError("KALSHI_API_PRIVATE_KEY_PEM is not set")
+    return serialization.load_pem_private_key(
+        pem_data.encode("utf-8"),
+        password=None,
+        backend=default_backend(),
+    )
+    
+# Decide which source to use: PEM string (cloud) or file path (local)
+if PRIVATE_KEY_PEM:
+    PRIVATE_KEY = load_private_key_from_pem(PRIVATE_KEY_PEM)
+else:
+    PRIVATE_KEY = load_private_key_from_path(PRIVATE_KEY_PATH)
 
 def create_signature(private_key, timestamp: str, method: str, path: str) -> str:
     """Create the request signature according to Kalshi docs."""
@@ -48,10 +64,6 @@ def create_signature(private_key, timestamp: str, method: str, path: str) -> str
     )
 
     return base64.b64encode(signature).decode("utf-8")
-
-
-PRIVATE_KEY = load_private_key(PRIVATE_KEY_PATH)
-
 
 def kalshi_get(path: str):
     """
