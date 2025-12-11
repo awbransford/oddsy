@@ -134,6 +134,27 @@ def fetch_kalshi_markets(status: str = "open", max_pages: int = 5, page_limit: i
         
     return pd.json_normalize(markets)
 
+def compute_probability(row):
+    # 1) Prefer last traded
+    lt = row.get("last_traded_pct")
+    if lt is not None and not np.isnan(lt) and lt > 0:
+        return lt
+
+    # 2) Then mid between bid/ask if both present
+    bid = row.get("yes_bid_pct")
+    ask = row.get("yes_ask_pct")
+    if bid is not None and ask is not None:
+        if not np.isnan(bid) and not np.isnan(ask) and (bid > 0 or ask > 0):
+            return round((bid + ask) / 2.0, 1)
+
+    # 3) Then whichever side is non-zero
+    for v in [bid, ask]:
+        if v is not None and not np.isnan(v) and v > 0:
+            return v
+
+    # 4) Fallback: unknown
+    return None
+
 def inspect_kalshi_categories(df):
     if "category" not in df.columns:
         st.warning("No 'category' column found in markets_df")
@@ -266,29 +287,7 @@ else:
             "last_price_dollars": "last_traded_pct",
         }
     )
-
-def compute_probability(row):
-    # 1) Prefer last traded
-    lt = row.get("last_traded_pct")
-    if lt is not None and not np.isnan(lt) and lt > 0:
-        return lt
-
-    # 2) Then mid between bid/ask if both present
-    bid = row.get("yes_bid_pct")
-    ask = row.get("yes_ask_pct")
-    if bid is not None and ask is not None:
-        if not np.isnan(bid) and not np.isnan(ask) and (bid > 0 or ask > 0):
-            return round((bid + ask) / 2.0, 1)
-
-    # 3) Then whichever side is non-zero
-    for v in [bid, ask]:
-        if v is not None and not np.isnan(v) and v > 0:
-            return v
-
-    # 4) Fallback: unknown
-    return None
-
-df_display["implied_prob_pct"] = df_display.apply(compute_probability, axis=1)
+    df_display["implied_prob_pct"] = df_display.apply(compute_probability, axis=1)
 
 # ---- Sort by 24h volume (Top Markets by Volume) ----
 if "volume_24h" in df_display.columns:
