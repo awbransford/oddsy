@@ -204,21 +204,193 @@ if st.button("Refresh Data"):
 markets_df = st.session_state.get("markets_df")
 trades_df = st.session_state.get("trades_df")
 
-markets_df = st.session_state.get("markets_df")
-trades_df = st.session_state.get("trades_df")
-
 if markets_df is None:
     st.info("Click 'Refresh Data' to load markets.")
 else:
-    # Basic debug
+    # ---- Debug counts (keep while iterating) ----
     st.write(
         "DEBUG: markets_df rows =", len(markets_df),
         "| trades_df rows =", 0 if trades_df is None else len(trades_df)
     )
 
-    # Just show the raw markets_df for now
-    st.write("DEBUG: showing raw markets_df with no filters or transforms")
-    st.write(f"DEBUG: markets_df columns = {list(markets_df.columns)}")
+    # ---- Top-level stats bar (already working) ----
+    top_level_stats = get_top_level_stats(markets_df, trades_df)
+    render_stats_bar(top_level_stats)
+    st.markdown("---")
 
-    st.write(f"Showing {len(markets_df)} raw markets")
-    st.dataframe(markets_df.reset_index(drop=True), use_container_width=True)
+    # ---- Build df_display for cards ----
+    df = markets_df.copy()
+
+    # Only keep useful columns for now
+    cols = [
+        "title",
+        "subtitle",
+        "ticker",
+        "category",
+        "status",
+        "close_time",
+        "yes_bid_dollars",
+        "yes_ask_dollars",
+        "no_bid_dollars",
+        "no_ask_dollars",
+        "last_price_dollars",
+        "volume",
+        "volume_24h",
+        "open_interest",
+    ]
+    existing_cols = [c for c in cols if c in df.columns]
+    df = df[existing_cols]
+
+    # Tag everything as Kalshi for now (Polymarket later)
+    df["platform"] = "Kalshi"
+
+    # Convert dollar odds → percentages
+    df_display = df.copy()
+    for col in [
+        "yes_bid_dollars",
+        "yes_ask_dollars",
+        "no_bid_dollars",
+        "no_ask_dollars",
+        "last_price_dollars",
+    ]:
+        if col in df_display.columns:
+            df_display[col] = (df_display[col].astype(float) * 100).round(1)
+
+    df_display = df_display.rename(
+        columns={
+            "yes_bid_dollars": "yes_bid_pct",
+            "yes_ask_dollars": "yes_ask_pct",
+            "no_bid_dollars": "no_bid_pct",
+            "no_ask_dollars": "no_ask_pct",
+            "last_price_dollars": "last_traded_pct",
+        }
+    )
+
+    # ---- Sort by 24h volume (Top Markets by Volume) ----
+    if "volume_24h" in df_display.columns:
+        df_display = df_display.sort_values("volume_24h", ascending=False)
+    elif "volume" in df_display.columns:
+        df_display = df_display.sort_values("volume", ascending=False)
+
+    st.subheader("Top Markets by Volume")
+    st.caption("Highest trading activity across platforms (currently Kalshi demo only).")
+
+    st.write(f"Showing {len(df_display)} markets")
+
+    # Optional: toggle raw table for debugging
+    show_table = st.checkbox("Show raw table view", value=False)
+    if show_table:
+        st.dataframe(df_display.reset_index(drop=True), use_container_width=True)
+    else:
+        # ---- Card grid layout (similar spirit to DeFiRate) ----
+        n_cols = 2  # 2 per row for readability; you can change to 3
+        cards_df = df_display.reset_index(drop=True)
+
+        for i in range(0, len(cards_df), n_cols):
+            row = cards_df.iloc[i : i + n_cols]
+            cols_streamlit = st.columns(len(row))
+
+            for col, (idx, m) in zip(cols_streamlit, row.iterrows()):
+                with col:
+                    with st.container(border=True):
+                        # Rank badge (1, 2, 3...)
+                        rank = idx + 1
+                        st.markdown(
+                            f"<div style='font-size: 0.85rem; "
+                            f"background-color: #f5a623; color: white; "
+                            f"display: inline-block; padding: 0.2rem 0.6rem; "
+                            f"border-radius: 999px; font-weight: 600;'>"
+                            f"{rank}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        # Header row: title + platform pill
+                        title = m.get("title", "Untitled market")
+                        platform_label = m.get("platform", "Kalshi")
+                        st.markdown(
+                            f"<div style='display:flex; justify-content:space-between; "
+                            f"align-items:center; margin-top:0.5rem;'>"
+                            f"<div style='font-weight:600; font-size:1rem;'>{title}</div>"
+                            f"<div style='background-color:#1a73e8; color:white; "
+                            f"padding:0.15rem 0.6rem; border-radius:999px; "
+                            f"font-size:0.75rem; font-weight:500;'>"
+                            f"{platform_label}</div>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        # Metadata row: category + status
+                        category = m.get("category", None)
+                        status = m.get("status", None)
+
+                        chips_html = "<div style='margin-top:0.4rem; display:flex; gap:0.4rem;'>"
+                        if category:
+                            chips_html += (
+                                "<div style='font-size:0.7rem; padding:0.1rem 0.4rem; "
+                                "border-radius:999px; background-color:#f2f2f2;'>"
+                                f"{category}</div>"
+                            )
+                        if status:
+                            color = "#e6f4ea" if str(status).lower() == "open" else "#fce8e6"
+                            text_color = "#137333" if str(status).lower() == "open" else "#c5221f"
+                            chips_html += (
+                                f"<div style='font-size:0.7rem; padding:0.1rem 0.4rem; "
+                                f"border-radius:999px; background-color:{color}; "
+                                f"color:{text_color};'>"
+                                f"{status}</div>"
+                            )
+                        chips_html += "</div>"
+
+                        st.markdown(chips_html, unsafe_allow_html=True)
+
+                        st.markdown("---")
+
+                        # Odds section (Yes side)
+                        yes_bid = m.get("yes_bid_pct", None)
+                        yes_ask = m.get("yes_ask_pct", None)
+                        last_traded = m.get("last_traded_pct", None)
+
+                        st.markdown(
+                            "<div style='font-size:0.8rem; font-weight:600; margin-bottom:0.2rem;'>"
+                            "Yes side</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.write(f"- Bid: {yes_bid}%  | Ask: {yes_ask}%")
+                        st.write(f"- Last traded: {last_traded}%")
+
+                        # Bottom stats row: volume, OI, end date
+                        vol_24h = m.get("volume_24h", None)
+                        vol_total = m.get("volume", None)
+                        oi = m.get("open_interest", None)
+                        close_time = m.get("close_time", "N/A")
+
+                        bottom_html = "<div style='display:flex; justify-content:space-between; margin-top:0.6rem; font-size:0.8rem;'>"
+
+                        bottom_html += (
+                            "<div>"
+                            "<div style='color:#6b6b6b; text-transform:uppercase; font-size:0.7rem;'>24h Volume</div>"
+                            f"<div style='font-weight:600;'>{vol_24h}</div>"
+                            "</div>"
+                        )
+
+                        bottom_html += (
+                            "<div>"
+                            "<div style='color:#6b6b6b; text-transform:uppercase; font-size:0.7rem;'>Open Int.</div>"
+                            f"<div style='font-weight:600;'>{oi}</div>"
+                            "</div>"
+                        )
+
+                        bottom_html += (
+                            "<div>"
+                            "<div style='color:#6b6b6b; text-transform:uppercase; font-size:0.7rem;'>Ends</div>"
+                            f"<div style='font-weight:600;'>{close_time}</div>"
+                            "</div>"
+                        )
+
+                        bottom_html += "</div>"
+
+                        st.markdown(bottom_html, unsafe_allow_html=True)
+
+                        # Optional: raw JSON details per market
+                        with st.expander("Raw details"):
+                            st.json(dict(m))
