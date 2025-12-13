@@ -5,6 +5,7 @@ import requests
 import os
 import datetime
 import base64
+import re
 
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -152,6 +153,40 @@ def fetch_kalshi_markets(status: str = "open", max_pages: int = 5, page_limit: i
         
     return pd.json_normalize(markets)
 
+# Short all-caps codes like ALI, CAM, PSKY, NFLX, ESWA, etc.
+SHORT_CODE_RE = re.compile(r"^[A-Z]{2,6}$")
+
+# Pattern for SI Swimsuit style markets:
+# "Will Alix Earle be on the cover of 2026 Sports Illustrated Swimsuit Issue?"
+SI_SWIM_PATTERN = re.compile(
+    r"^Will (.+?) be on the cover of .*Sports Illustrated Swimsuit",
+    re.IGNORECASE,
+)
+
+def extract_option_name_from_title(row):
+    """
+    Try to recover a human-readable option name from the market title.
+
+    This is mainly for markets where yes_sub_title is just a short code
+    like 'ALI', 'CAM', etc. We only attempt parsing in those cases.
+    """
+    title = (row.get("title") or "").strip()
+    yes_sub = (row.get("yes_sub_title") or "").strip()
+
+    # Only bother if yes_sub_title looks like a short code (e.g. ALI, PSKY)
+    if not (yes_sub and SHORT_CODE_RE.fullmatch(yes_sub)):
+        return None
+
+    # 1) Sports Illustrated Swimsuit pattern
+    m = SI_SWIM_PATTERN.match(title)
+    if m:
+        return m.group(1).strip()
+
+    # TODO: later we can add more patterns here
+    # e.g. takeover / special acquisition markets, if they follow a pattern
+
+    return None
+
 def compute_probability(row):
     # 1) Prefer last traded
     lt = row.get("last_traded_pct")
@@ -279,9 +314,13 @@ else:
         "volume",
         "volume_24h",
         "open_interest",
+        "yes_sub_title",
     ]
     existing_cols = [c for c in cols if c in df.columns]
     df = df[existing_cols]
+    
+    #NEW: parse human-readable option names
+    df["option_name_from_title"] = df.apply(extract_option_name_from_title, axis=1)
     
     def compute_implied_yes_prob(row):
         """
@@ -480,37 +519,47 @@ else:
 
                         st.markdown("---")
 
-                        # Helper to choose a label per outcome row
                         def outcome_label(row):
                             """
                             Choose a short, outcome-specific label.
-                            Priority:
-                            1) yes_sub_title  (often candidate/party name)
-                            2) subtitle
-                            3) custom_strike.* fields
-                            4) ticker
-                            5) title
                             """
-                            val = row.get("yes_sub_title")
-                            if isinstance(val, str) and val.strip():
-                                return val.strip()
+                            
+                            # 0) If we successfully parsed a name from the title, use that first
+                            from_title = row.get("option_name_from_title")
+                            if isinstance(from_title, str) and from_title.strip():
+                                return from_title.strip()
+                            
+                            # Readable label for a single outcome within an event.
 
-                            val = row.get("subtitle")
-                            if isinstance(val, str) and val.strip():
-                                return val.strip()
+                            # Priority:
+                            # 1) yes_sub_title, cleaned (this is where things like ':: Democratic' live)
+                            # 2) ticker suffix (after the last '-'), as a fallback
+                            
 
-                            # Look through any custom_strike.* keys
-                            for key in row.index:
-                                if str(key).startswith("custom_strike"):
-                                    v = row.get(key)
-                                    if isinstance(v, str) and v.strip():
-                                        return v.strip()
+                            # 1) Prefer yes_sub_title if it’s there
+                            raw = row.get("yes_sub_title")
+                            label = ""
+                            if isinstance(raw, str):
+                                label = raw.strip()
 
-                            val = row.get("ticker")
-                            if isinstance(val, str) and val.strip():
-                                return val.strip()
+                            # 2) Fallback to ticker suffix if we have nothing
+                            if not label:
+                                ticker = str(row.get("ticker", "")).strip()
+                                if "-" in ticker:
+                                    label = ticker.split("-")[-1].strip()
+                                else:
+                                    label = ticker
 
-                            return row.get("title") or "Unknown"
+                            # 3) Clean Kalshi’s "::" prefix if present
+                            if label.startswith("::"):
+                                # remove all leading colons + trim spaces
+                                label = label.lstrip(":").strip()
+
+                            # Final fallback
+                            if not label:
+                                label = "(unknown)"
+
+                            return label
 
                         # ---- Top 2 outcomes (by YES prob) ----
                         st.markdown(
